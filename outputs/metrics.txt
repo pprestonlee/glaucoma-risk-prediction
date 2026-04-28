@@ -1,0 +1,28 @@
+Fold AUCs:
+  Fold 1: 0.742
+  Fold 2: 0.777
+  Fold 3: 0.737
+  Fold 4: 0.767
+  Fold 5: 0.700
+
+Mean AUC: 0.745
+
+=== Raw (uncalibrated) ===
+PR-AUC (Avg Precision): 0.276
+Brier Score:            0.157
+
+  Threshold = 0.50
+    Precision: 0.345  Recall: 0.475  F1: 0.400
+
+  Optimal threshold (max F1) = 0.14
+    Precision: 0.288  Recall: 0.750  F1: 0.417
+
+=== Calibrated (isotonic regression) ===
+PR-AUC (Avg Precision): 0.307
+Brier Score:            0.112
+
+  Threshold = 0.50
+    Precision: 0.000  Recall: 0.000  F1: 0.000
+
+  Optimal threshold (max F1) = 0.20
+    Precision: 0.291  Recall: 0.750  F1: 0.420
