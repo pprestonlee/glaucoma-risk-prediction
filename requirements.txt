@@ -1,4 +1,5 @@
 boto3
+plotly
 pandas
 numpy
 scikit-learn

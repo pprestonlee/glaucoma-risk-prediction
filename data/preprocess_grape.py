@@ -3,9 +3,7 @@ import numpy as np
 import os
 from sklearn.linear_model import LinearRegression
 
-# =============================
-# Config
-# =============================
+# cfg
 RAW_PATH = "data/raw/clinical/vf_clinical.xlsx"
 OUTPUT_PATH = "data/processed/patient_level.csv"
 
@@ -13,9 +11,7 @@ os.makedirs("data/intermediate", exist_ok=True)
 os.makedirs("data/processed", exist_ok=True)
 
 
-# =============================
-# Utilities
-# =============================
+# utils
 def clean_columns(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = (
         df.columns
@@ -46,16 +42,14 @@ def fix_duplicate_columns(df):
     return df
 
 
-# =============================
-# VF Handling
-# =============================
+# vf handling
 def split_vf(df: pd.DataFrame):
     """Robust VF column detection."""
 
-    # Try to detect VF columns
+    # search for vfs
     vf_cols = df.columns[df.columns.str.contains("vf", case=False, na=False)]
 
-    # Fallback: take last numeric columns
+    # fallback taking last 60 columns
     if len(vf_cols) < 50:
         numeric_cols = df.select_dtypes(include=[np.number]).columns
         vf_cols = numeric_cols[-61:]
@@ -82,18 +76,18 @@ def engineer_vf_features(vf: pd.DataFrame):
     features["vf_std"] = vf_valid.std(axis=1)
     features["vf_max"] = vf_valid.max(axis=1)
 
-    # Defect features — thresholds are for absolute sensitivity (dB), not deviation scores
+    # defect features — thresholds are for absolute sensitivity (dB), not deviation scores
     features["vf_defect_count"] = (vf_valid < 15).sum(axis=1)   # mild+ depression
     features["vf_defect_ratio"] = features["vf_defect_count"] / vf_valid.notna().sum(axis=1)
     features["vf_severe_loss_count"] = (vf_valid < 5).sum(axis=1)  # near-total loss
 
-    # Superior/inferior asymmetry (assumes top-to-bottom point ordering)
+    # superior/inferior asymmetry (assumes top-to-bottom point ordering)
     features["vf_si_asymmetry"] = (
         vf_valid.iloc[:, :half].mean(axis=1) -
         vf_valid.iloc[:, half:].mean(axis=1)
     )
 
-    # Left/right asymmetry via even/odd index interleave (second spatial dimension)
+    # left/right asymmetry via even/odd index interleave (second spatial dimension)
     even_idx = list(range(0, n_points, 2))
     odd_idx = list(range(1, n_points, 2))
     features["vf_lr_asymmetry"] = (
@@ -104,9 +98,7 @@ def engineer_vf_features(vf: pd.DataFrame):
     return features
 
 
-# =============================
-# VF Progression
-# =============================
+# vf progression
 def compute_vf_progression(followup_df, followup_vf):
     """Per-eye linear slope of VF mean over time, plus first-to-last delta."""
     followup_vf = followup_vf.replace(-1, np.nan)
@@ -134,9 +126,7 @@ def compute_vf_progression(followup_df, followup_vf):
     return pd.DataFrame(records)
 
 
-# =============================
-# IOP Trend
-# =============================
+# iop trend
 def compute_iop_slope(followup_df):
     slopes = []
 
@@ -161,43 +151,37 @@ def compute_iop_slope(followup_df):
     return pd.DataFrame(slopes, columns=["eye_id", "iop_slope"])
 
 
-# =============================
-# Load Data
-# =============================
+# load data
 def load_data(path):
     baseline = pd.read_excel(path, sheet_name="Baseline", header=0)
     followup = pd.read_excel(path, sheet_name="Follow-up", header=0)
     return baseline, followup
 
 
-# =============================
-# Main Preprocessing
-# =============================
+# preprocessing
 def preprocess():
     print("Loading data...")
     baseline, followup = load_data(RAW_PATH)
 
-    # Clean columns
+    # clean columns
     baseline = clean_columns(baseline)
     followup = clean_columns(followup)
 
     baseline = fix_duplicate_columns(baseline)
     followup = fix_duplicate_columns(followup)
 
-    # Replace "/" with NaN
+    # replace "/" with NaN
     baseline = baseline.replace("/", np.nan)
     followup = followup.replace("/", np.nan)
 
-    # Debug (run once if needed)
+    # debug
     print("Total baseline columns:", len(baseline.columns))
 
-    # Split VF
+    # split VF
     baseline_clinical, vf_baseline = split_vf(baseline)
     followup_clinical, vf_followup = split_vf(followup)
 
-    # =============================
-    # VF Feature Engineering
-    # =============================
+    # vf feature engineering
     print("Engineering VF features...")
     vf_features = engineer_vf_features(vf_baseline)
 
@@ -206,21 +190,15 @@ def preprocess():
         axis=1
     )
 
-    # =============================
-    # IDs
-    # =============================
+    # eye_id 
     baseline_clinical = create_eye_id(baseline_clinical)
     followup_clinical = create_eye_id(followup_clinical)
 
-    # =============================
-    # Target
-    # =============================
+    # target
     baseline_clinical["target"] = baseline_clinical["progression_status_plr2"]
     baseline_clinical = baseline_clinical.dropna(subset=["target"])
 
-    # =============================
-    # Longitudinal Features
-    # =============================
+    # longitudinal features
     print("Building longitudinal features...")
 
     followup_clinical["iop"] = pd.to_numeric(followup_clinical["iop"], errors="coerce")
@@ -262,21 +240,17 @@ def preprocess():
     # VF progression
     vf_progression = compute_vf_progression(followup_clinical, vf_followup)
 
-    # =============================
-    # Merge
-    # =============================
+    # merges
     df = baseline_clinical.merge(iop_stats, on="eye_id", how="left")
     df = df.merge(visits, on="eye_id", how="left")
     df = df.merge(interval, on="eye_id", how="left")
     df = df.merge(iop_slope, on="eye_id", how="left")
     df = df.merge(vf_progression, on="eye_id", how="left")
 
-    # Visit frequency
+    # visit frequency
     df["visit_frequency"] = df["visit_count"] / (df["max_interval_years"] + 1e-5)
 
-    # =============================
-    # Interaction Features
-    # =============================
+    # interaction features
     df["iop"] = pd.to_numeric(df["iop"], errors="coerce")
     df["oct_rnfl_thickness_mean"] = pd.to_numeric(df["oct_rnfl_thickness_mean"], errors="coerce")
     df["age"] = pd.to_numeric(df["age"], errors="coerce")
@@ -285,9 +259,7 @@ def preprocess():
     df["rnfl_x_vf_mean"] = df["oct_rnfl_thickness_mean"] * df["vf_mean"]
     df["iop_x_vf_mean"] = df["iop"] * df["vf_mean"]
 
-    # =============================
-    # Feature Selection
-    # =============================
+    # feature selection
     feature_cols = [
         "eye_id",
         "age",
@@ -323,28 +295,24 @@ def preprocess():
 
     df = df[feature_cols]
 
-    # =============================
-    # Encoding
-    # =============================
+    # encoding
     df["gender"] = df["gender"].map({"M": 1, "F": 0})
     df["category_of_glaucoma"] = df["category_of_glaucoma"].map({
         "OAG": 0,
         "ACG": 1
     })
 
-    # Convert numeric
+    # convert numeric
     numeric_cols = df.columns.drop(["eye_id"])
     df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors="coerce")
 
-    # Fill missing
+    # fill missing
     df = df.fillna(df.median(numeric_only=True))
 
     print(df.head())
     print(df.columns)
 
-    # =============================
-    # Save
-    # =============================
+    # save
     df.to_csv(OUTPUT_PATH, index=False)
 
     print(f"Saved dataset to {OUTPUT_PATH}")
@@ -353,8 +321,6 @@ def preprocess():
     print(df["target"].value_counts(normalize=True))
 
 
-# =============================
-# Run
-# =============================
+# run
 if __name__ == "__main__":
     preprocess()

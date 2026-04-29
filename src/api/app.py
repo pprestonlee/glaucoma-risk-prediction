@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
-# ── Config (injected as env vars in ECS; fall back to locals for dev) ─────────
+# config
 S3_BUCKET      = os.environ.get("S3_BUCKET", "")
 SNS_TOPIC_ARN  = os.environ.get("SNS_TOPIC_ARN", "")
 AWS_REGION     = os.environ.get("AWS_DEFAULT_REGION", "us-east-2")
@@ -66,22 +66,22 @@ app = FastAPI(
 )
 
 
-# ── Request / response schemas ────────────────────────────────────────────────
+# schema for request and response 
 class PredictionInput(BaseModel):
-    # Clinical baseline
+    # clinical baseline
     age: float                    = Field(..., ge=0, le=120, description="Age in years")
     gender: int                   = Field(..., ge=0, le=1,   description="1=Male 0=Female")
     iop: float                    = Field(..., description="Baseline IOP (mmHg)")
     cct: float                    = Field(..., description="Central corneal thickness (um)")
     category_of_glaucoma: int     = Field(..., ge=0, le=1,   description="0=OAG 1=ACG")
     oct_rnfl_thickness_mean: float= Field(..., description="Mean RNFL thickness (um)")
-    # Longitudinal IOP
+    # longitudinal IOP
     iop_mean: float               = Field(..., description="Mean IOP across follow-up (mmHg)")
     iop_max: float
     iop_min: float
     iop_std: float
     iop_slope: float              = Field(..., description="IOP trend (mmHg/year)")
-    # Visit history
+    # visit history
     visit_count: int              = Field(..., ge=1)
     max_interval_years: float     = Field(..., description="Total follow-up duration (years)")
     visit_frequency: float        = Field(..., description="Visits per year")
@@ -107,7 +107,7 @@ class PredictionOutput(BaseModel):
     recommendation: str
 
 
-# ── Background tasks ──────────────────────────────────────────────────────────
+# logging
 def _log_to_s3(request_id: str, inputs: dict, cal_prob: float, category: str) -> None:
     """Write one JSON record per prediction to S3 under a Hive-partitioned prefix."""
     if not S3_BUCKET:
@@ -134,9 +134,8 @@ def _log_to_s3(request_id: str, inputs: dict, cal_prob: float, category: str) ->
     except Exception:
         logger.exception("S3 prediction log failed")
 
-
+# push metrics to CloudWatch 
 def _push_metrics(cal_prob: float, category: str) -> None:
-    """Push per-prediction metrics to CloudWatch custom namespace."""
     try:
         _cw.put_metric_data(
             Namespace="GlaucomaRiskAPI",
@@ -152,9 +151,8 @@ def _push_metrics(cal_prob: float, category: str) -> None:
     except Exception:
         logger.exception("CloudWatch metric push failed")
 
-
+# SNS alerting for high-risk patients
 def _alert_high_risk(request_id: str, cal_prob: float) -> None:
-    """Publish an SNS alert for any high-risk prediction."""
     if not SNS_TOPIC_ARN:
         return
     try:
@@ -173,7 +171,7 @@ def _alert_high_risk(request_id: str, cal_prob: float) -> None:
         logger.exception("SNS alert failed")
 
 
-# ── Routes ────────────────────────────────────────────────────────────────────
+# endpoints
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -202,7 +200,6 @@ def predict(body: PredictionInput, background_tasks: BackgroundTasks):
         category = "high"
         rec = "High progression risk; consider treatment adjustment and follow-up in 3 months."
 
-    # All three side-effects run after the response is returned
     background_tasks.add_task(_log_to_s3, request_id, body.model_dump(), cal, category)
     background_tasks.add_task(_push_metrics, cal, category)
     if category == "high":
