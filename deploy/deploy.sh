@@ -3,7 +3,7 @@
 # Run from the project root: bash deploy/deploy.sh
 set -euo pipefail
 
-# ─── Config ────────────────────────────────────────────────────────────────────
+# config
 REPO_NAME="glaucoma-risk-api"
 CLUSTER_NAME="glaucoma-cluster"
 SERVICE_NAME="glaucoma-service"
@@ -14,7 +14,6 @@ ALERT_EMAIL="your-alert-email@example.com"
 PORT=8000
 CPU=512
 MEMORY=1024
-# ────────────────────────────────────────────────────────────────────────────────
 
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 REGION=$(aws configure get region)
@@ -24,7 +23,7 @@ S3_BUCKET="glaucoma-risk-${ACCOUNT_ID}"
 
 echo "==> Account: ${ACCOUNT_ID}  Region: ${REGION}"
 
-# ── 1. S3 bucket ───────────────────────────────────────────────────────────────
+# s3
 echo "==> Ensuring S3 bucket exists..."
 aws s3api head-bucket --bucket "${S3_BUCKET}" 2>/dev/null || \
   aws s3api create-bucket \
@@ -32,16 +31,40 @@ aws s3api head-bucket --bucket "${S3_BUCKET}" 2>/dev/null || \
     --region "${REGION}" \
     --create-bucket-configuration LocationConstraint="${REGION}"
 
-echo "==> Uploading model artifact to S3..."
-aws s3 cp models/model_calibrated.pkl "s3://${S3_BUCKET}/models/model_calibrated.pkl"
+echo "==> Resolving model artifact..."
+MODEL_PKG_ARN=$(aws sagemaker list-model-packages \
+  --model-package-group-name GlaucomaRiskModels \
+  --model-approval-status Approved \
+  --sort-by CreationTime \
+  --sort-order Descending \
+  --max-results 1 \
+  --query "ModelPackageSummaryList[0].ModelPackageArn" \
+  --output text 2>/dev/null || echo "")
 
-# ── 2. SNS topic + email subscription ─────────────────────────────────────────
+if [ -n "${MODEL_PKG_ARN}" ] && [ "${MODEL_PKG_ARN}" != "None" ]; then
+  echo "==> Pulling approved model from registry: ${MODEL_PKG_ARN}"
+  MODEL_TAR_URI=$(aws sagemaker describe-model-package \
+    --model-package-name "${MODEL_PKG_ARN}" \
+    --query "InferenceSpecification.Containers[0].ModelDataUrl" \
+    --output text)
+  TMP_DIR=$(mktemp -d)
+  aws s3 cp "${MODEL_TAR_URI}" "${TMP_DIR}/model.tar.gz"
+  tar -xzf "${TMP_DIR}/model.tar.gz" -C "${TMP_DIR}"
+  aws s3 cp "${TMP_DIR}/model_calibrated.pkl" "s3://${S3_BUCKET}/models/model_calibrated.pkl"
+  rm -rf "${TMP_DIR}"
+  echo "==> Approved model promoted to s3://${S3_BUCKET}/models/model_calibrated.pkl"
+else
+  echo "==> No approved model in registry — uploading local artifact..."
+  aws s3 cp models/model_calibrated.pkl "s3://${S3_BUCKET}/models/model_calibrated.pkl"
+fi
+
+# sns
 echo "==> Creating SNS topic..."
 SNS_TOPIC_ARN=$(aws sns create-topic \
   --name "glaucoma-high-risk-alerts" \
   --query "TopicArn" --output text)
 
-# subscribe only if not already subscribed
+# sub only if not already subbed
 ALREADY=$(aws sns list-subscriptions-by-topic \
   --topic-arn "${SNS_TOPIC_ARN}" \
   --query "Subscriptions[?Endpoint=='${ALERT_EMAIL}'].SubscriptionArn" \
@@ -57,7 +80,7 @@ else
 fi
 echo "==> SNS topic: ${SNS_TOPIC_ARN}"
 
-# ── 3. Athena / Glue database + external table ────────────────────────────────
+# athena / glue db
 ATHENA_RESULTS="s3://${S3_BUCKET}/athena-results/"
 
 echo "==> Creating Glue database..."
@@ -111,7 +134,7 @@ aws athena start-query-execution \
 echo "==> Athena table registered. Query predictions with:"
 echo "    SELECT * FROM glaucoma_db.predictions LIMIT 10;"
 
-# ── 4. ECR repository ──────────────────────────────────────────────────────────
+# ecr repo
 echo "==> Ensuring ECR repository exists..."
 aws ecr describe-repositories --repository-names "${REPO_NAME}" --region "${REGION}" \
   > /dev/null 2>&1 || \
@@ -120,7 +143,7 @@ aws ecr describe-repositories --repository-names "${REPO_NAME}" --region "${REGI
     --image-scanning-configuration scanOnPush=true \
     --region "${REGION}"
 
-# ── 5. Docker build + push ─────────────────────────────────────────────────────
+# docker build/push
 echo "==> Logging in to ECR..."
 aws ecr get-login-password --region "${REGION}" | \
   docker login --username AWS --password-stdin "${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com"
@@ -132,12 +155,12 @@ echo "==> Pushing to ECR..."
 docker tag "${REPO_NAME}:latest" "${IMAGE_URI}"
 docker push "${IMAGE_URI}"
 
-# ── 6. CloudWatch log group ────────────────────────────────────────────────────
+# cloudwatch
 echo "==> Ensuring CloudWatch log group exists..."
 aws logs create-log-group --log-group-name "${LOG_GROUP}" --region "${REGION}" \
   2>/dev/null || true
 
-# ── 7. IAM execution role ──────────────────────────────────────────────────────
+# iam execution role
 EXEC_ROLE_NAME="ecsTaskExecutionRole"
 EXEC_ROLE_ARN=$(aws iam get-role --role-name "${EXEC_ROLE_NAME}" \
   --query "Role.Arn" --output text 2>/dev/null) || {
@@ -151,7 +174,7 @@ EXEC_ROLE_ARN=$(aws iam get-role --role-name "${EXEC_ROLE_NAME}" \
     --policy-arn "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
-# ── 8. IAM task role (S3 + CloudWatch + SNS) ──────────────────────────────────
+# iam task role
 echo "==> Ensuring ECS task role exists..."
 TASK_ROLE_NAME="glaucomaTaskRole"
 TASK_ROLE_ARN=$(aws iam get-role --role-name "${TASK_ROLE_NAME}" \
@@ -182,7 +205,7 @@ aws iam put-role-policy \
   }"
 echo "==> Task role: ${TASK_ROLE_ARN}"
 
-# ── 9. ECS task definition ─────────────────────────────────────────────────────
+# ecs 
 echo "==> Registering task definition..."
 TASK_DEF=$(cat <<EOF
 {
@@ -221,13 +244,13 @@ TASK_ARN=$(aws ecs register-task-definition \
   --query "taskDefinition.taskDefinitionArn" --output text)
 echo "==> Task definition: ${TASK_ARN}"
 
-# ── 10. ECS cluster ────────────────────────────────────────────────────────────
+# ecs cluster
 echo "==> Ensuring ECS cluster exists..."
 aws ecs describe-clusters --clusters "${CLUSTER_NAME}" \
   --query "clusters[?status=='ACTIVE'].clusterName" --output text \
   | grep -q "${CLUSTER_NAME}" || aws ecs create-cluster --cluster-name "${CLUSTER_NAME}"
 
-# ── 11. Networking ─────────────────────────────────────────────────────────────
+# networking
 echo "==> Resolving default VPC and subnets..."
 VPC_ID=$(aws ec2 describe-vpcs \
   --filters "Name=isDefault,Values=true" \
@@ -253,7 +276,7 @@ if [ "${SG_ID}" = "None" ] || [ -z "${SG_ID}" ]; then
 fi
 echo "==> VPC: ${VPC_ID}  SG: ${SG_ID}"
 
-# ── 12. ECS service — create or update ────────────────────────────────────────
+# ecs service
 NETWORK_CONFIG="awsvpcConfiguration={subnets=[${SUBNET_IDS}],securityGroups=[${SG_ID}],assignPublicIp=ENABLED}"
 SERVICE_STATUS=$(aws ecs describe-services \
   --cluster "${CLUSTER_NAME}" --services "${SERVICE_NAME}" \
@@ -273,7 +296,7 @@ else
     --network-configuration "${NETWORK_CONFIG}" > /dev/null
 fi
 
-# ── 13. Print endpoint ─────────────────────────────────────────────────────────
+# endpoint
 echo ""
 echo "==> Deployment complete. Waiting for task to start..."
 sleep 20

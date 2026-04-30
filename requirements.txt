@@ -11,3 +11,4 @@ uvicorn
 joblib
 pydantic
 matplotlib
+sagemaker

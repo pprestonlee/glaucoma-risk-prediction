@@ -17,12 +17,22 @@ from sklearn.metrics import (
 from sklearn.model_selection import GroupKFold
 from xgboost import XGBClassifier
 
-from src.utils.logger import get_logger
+try:
+    from src.utils.logger import get_logger
+except ImportError:
+    import logging
+    def get_logger(name):
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+        return logging.getLogger(name)
 
-# configs
-DATA_PATH = "data/processed/patient_level.csv"
-MODEL_PATH = "models/model.pkl"
-OUTPUT_DIR = "outputs/"
+# SageMaker env vars
+_SM_DATA    = os.environ.get("SM_CHANNEL_TRAINING")
+_SM_MODELS  = os.environ.get("SM_MODEL_DIR")
+_SM_OUTPUT  = os.environ.get("SM_OUTPUT_DATA_DIR")
+
+DATA_PATH  = os.path.join(_SM_DATA,   "patient_level.csv") if _SM_DATA   else "data/processed/patient_level.csv"
+MODEL_DIR  = _SM_MODELS  or "models"
+OUTPUT_DIR = _SM_OUTPUT  or "outputs/"
 
 N_SPLITS = 5
 RANDOM_STATE = 42
@@ -37,7 +47,7 @@ MODEL_PARAMS = {
     "random_state": RANDOM_STATE
 }
 
-os.makedirs("models", exist_ok=True)
+os.makedirs(MODEL_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 logger = get_logger(__name__)
@@ -115,8 +125,9 @@ def save_best_model(models, aucs):
     best_idx = int(np.argmax(aucs))
     best_model = models[best_idx]
 
-    joblib.dump(best_model, MODEL_PATH)
-    logger.info(f"Best model saved to {MODEL_PATH}")
+    path = os.path.join(MODEL_DIR, "model.pkl")
+    joblib.dump(best_model, path)
+    logger.info(f"Best model saved to {path}")
 
     return best_model
 
@@ -263,8 +274,9 @@ def main():
     best_model = save_best_model(models, aucs)
 
     calibrator = fit_calibrator(oof_labels, oof_preds)
-    joblib.dump({"model": best_model, "calibrator": calibrator}, "models/model_calibrated.pkl")
-    logger.info("Calibrated model saved to models/model_calibrated.pkl")
+    cal_path = os.path.join(MODEL_DIR, "model_calibrated.pkl")
+    joblib.dump({"model": best_model, "calibrator": calibrator}, cal_path)
+    logger.info(f"Calibrated model saved to {cal_path}")
 
     cal_preds = calibrator.predict(oof_preds)
 

@@ -10,6 +10,8 @@ Glaucoma is a leading cause of irreversible blindness. Early identification of p
 
 This project builds a full production ML pipeline on the **GRAPE dataset** — from raw clinical data through feature engineering, model training, calibration, cloud deployment, and real-time monitoring — demonstrating the complete lifecycle of a healthcare data science system.
 
+Training is managed by **AWS SageMaker**: a training job runs the full pipeline on managed compute, the resulting artifact is registered in the **SageMaker Model Registry** under a `PendingManualApproval` status, and deployment only proceeds after explicit approval — providing a governance gate appropriate for a clinical tool.
+
 ---
 
 ## Results
@@ -61,31 +63,40 @@ Raw Data (GRAPE Excel)
          │
          ▼
 ┌─────────────────────┐
-│  Model Training     │  XGBoost · GroupKFold · scale_pos_weight
-│  src/models/train.py│  Isotonic calibration · SHAP explainability
+│  SageMaker Training │  Managed compute (ml.m5.large)
+│  deploy/sagemaker_  │  XGBoost · GroupKFold · scale_pos_weight
+│  train.py           │  Isotonic calibration · SHAP · CloudWatch logs
 └────────┬────────────┘
          │
-         ├──── models/model_calibrated.pkl  →  S3
-         └──── outputs/ (SHAP, PR curve, calibration, metrics)
-                        │
-                        ▼
-              ┌─────────────────────┐
-              │   FastAPI REST API  │  /predict  /health  /docs
-              │   src/api/app.py    │  Boto3 · Background tasks
-              └────────┬────────────┘
-                       │
-          ┌────────────┼────────────┐────────────┐
-          ▼            ▼            ▼            ▼
-        AWS S3      AWS SNS    CloudWatch    Athena
-    (model +      (high-risk   (metrics     (SQL over
-   pred logs)     alerts)     dashboard)   pred logs)
-                       │
-                       ▼
-              ┌─────────────────────┐
-              │  Streamlit Dashboard│  Risk assessment form
-              │  src/dashboard/     │  Population analytics
-              │  app.py             │  Model info + SHAP plots
-              └─────────────────────┘
+         ▼
+┌─────────────────────┐
+│  Model Registry     │  PendingManualApproval → Approved
+│  GlaucomaRiskModels │  Versioned artifacts · audit trail
+└────────┬────────────┘
+         │  (deploy.sh pulls latest approved model)
+         ▼
+     AWS S3  ──────────────────────────────────┐
+  models/model_calibrated.pkl                  │
+         │                                     │
+         ▼                                     │
+┌─────────────────────┐                        │
+│   FastAPI REST API  │  /predict  /health      │
+│   src/api/app.py    │  /docs · BackgroundTasks│
+└────────┬────────────┘                        │
+         │                                     │
+   ┌─────┼──────────┬────────────┐             │
+   ▼     ▼          ▼            ▼             │
+ S3    AWS SNS  CloudWatch    Athena ──────────┘
+(pred  (high-   (Prediction  (SQL over
+logs)  risk     Count,Risk   pred logs)
+       alerts)  Score,etc.)
+         │
+         ▼
+┌─────────────────────┐
+│  Streamlit Dashboard│  Risk assessment form
+│  src/dashboard/     │  Population analytics
+│  app.py             │  Model info + SHAP plots
+└─────────────────────┘
 ```
 
 ---
@@ -125,7 +136,9 @@ Raw Data (GRAPE Excel)
 
 | Service | Purpose |
 |---|---|
-| **ECR** | Container registry for the Docker image |
+| **SageMaker Training** | Managed training jobs on `ml.m5.large` — reproducible, auditable, CloudWatch-logged |
+| **SageMaker Model Registry** | Versioned model artifacts with `PendingManualApproval` → `Approved` governance gate |
+| **ECR** | Container registry for the FastAPI Docker image |
 | **ECS Fargate** | Managed serverless container hosting (0.5 vCPU / 1 GB) |
 | **S3** | Model artifact storage + Hive-partitioned prediction logs |
 | **Athena** | SQL querying over prediction logs (`glaucoma_db.predictions`) |
@@ -165,7 +178,8 @@ Raw Data (GRAPE Excel)
 │   └── eda.ipynb                # Exploratory data analysis (11 sections)
 │
 ├── deploy/
-│   └── deploy.sh                # One-command AWS deployment
+│   ├── sagemaker_train.py       # Launch SageMaker training job + register in Model Registry
+│   └── deploy.sh                # One-command AWS deployment (pulls approved model from registry)
 │
 ├── Dockerfile                   # Production container (python:3.11-slim)
 └── requirements.txt
@@ -183,7 +197,7 @@ pip install -r requirements.txt
 # 2. Preprocess data
 python data/preprocess_grape.py
 
-# 3. Train model
+# 3. Train model (local)
 PYTHONPATH=. python src/models/train.py
 
 # 4. Start API
@@ -204,6 +218,6 @@ jupyter notebook notebooks/eda.ipynb
 
 **API & Dashboard** — FastAPI · Uvicorn · Pydantic · Streamlit · Plotly
 
-**Cloud** — AWS ECR · ECS Fargate · S3 · Athena · CloudWatch · SNS · IAM
+**Cloud** — AWS SageMaker (Training · Model Registry) · ECR · ECS Fargate · S3 · Athena · CloudWatch · SNS · IAM
 
 **Dev** — Docker · Jupyter · Matplotlib · Seaborn
